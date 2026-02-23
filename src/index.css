@@ -1,0 +1,178 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 222 60% 7%;
+    --foreground: 210 40% 96%;
+
+    --card: 225 45% 8%;
+    --card-foreground: 210 40% 96%;
+
+    --popover: 225 45% 8%;
+    --popover-foreground: 210 40% 96%;
+
+    --primary: 243 76% 59%;
+    --primary-foreground: 210 40% 98%;
+    --primary-glow: 240 72% 67%;
+
+    --secondary: 224 40% 13%;
+    --secondary-foreground: 210 40% 96%;
+
+    --muted: 222 30% 16%;
+    --muted-foreground: 217 20% 45%;
+
+    --accent: 224 40% 15%;
+    --accent-foreground: 210 40% 96%;
+
+    --destructive: 349 86% 60%;
+    --destructive-foreground: 210 40% 98%;
+
+    --success: 160 84% 39%;
+    --success-foreground: 210 40% 98%;
+
+    --warning: 38 92% 50%;
+    --warning-foreground: 222 60% 7%;
+
+    --border: 222 35% 20%;
+    --input: 222 35% 20%;
+    --ring: 243 76% 59%;
+
+    --radius: 0.5rem;
+
+    --surface: 225 45% 8%;
+    --surface-elevated: 224 42% 14%;
+
+    --sidebar-background: 225 50% 6%;
+    --sidebar-foreground: 210 40% 96%;
+    --sidebar-primary: 243 76% 59%;
+    --sidebar-primary-foreground: 210 40% 98%;
+    --sidebar-accent: 224 40% 15%;
+    --sidebar-accent-foreground: 210 40% 96%;
+    --sidebar-border: 222 35% 20%;
+    --sidebar-ring: 243 76% 59%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground font-sans;
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+  code, pre, .font-mono {
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--primary) / 0.4);
+    border-radius: 999px;
+  }
+  ::selection {
+    background: hsl(var(--primary) / 0.3);
+  }
+}
+
+@layer components {
+  .card-shadow {
+    box-shadow: 0 0 0 1px hsl(var(--border)), 0 4px 24px rgba(0,0,0,0.4);
+  }
+  .glow-shadow {
+    box-shadow: 0 0 20px rgba(79, 70, 229, 0.3);
+  }
+  .glow-border {
+    box-shadow: 0 0 0 1px hsl(var(--primary)), 0 0 20px rgba(79,70,229,0.2);
+  }
+
+  /* ECG Background Animation */
+  @keyframes ecg-move {
+    0% { transform: translateX(0); }
+    100% { transform: translateX(-50%); }
+  }
+  .ecg-line {
+    animation: ecg-move 8s linear infinite;
+  }
+
+  /* Gradient text */
+  .gradient-text {
+    background: linear-gradient(135deg, hsl(var(--primary)), hsl(var(--primary-glow)), hsl(var(--primary)));
+    background-size: 200% 200%;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    animation: gradient-shift 4s ease infinite;
+  }
+  @keyframes gradient-shift {
+    0%, 100% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+  }
+
+  /* Shimmer button effect */
+  .shimmer-btn {
+    position: relative;
+    overflow: hidden;
+  }
+  .shimmer-btn::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.15), transparent);
+    transition: none;
+  }
+  .shimmer-btn:hover::after {
+    animation: shimmer-sweep 0.6s ease forwards;
+  }
+  @keyframes shimmer-sweep {
+    0% { left: -100%; }
+    100% { left: 100%; }
+  }
+
+  /* Skeleton shimmer */
+  .skeleton-shimmer {
+    background: linear-gradient(90deg, hsl(var(--surface)) 25%, hsl(var(--surface-elevated)) 50%, hsl(var(--surface)) 75%);
+    background-size: 200% 100%;
+    animation: skeleton-loading 1.5s infinite;
+  }
+  @keyframes skeleton-loading {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+
+  /* Pulse glow */
+  @keyframes pulse-glow {
+    0%, 100% { opacity: 0.6; }
+    50% { opacity: 1; }
+  }
+  .pulse-glow {
+    animation: pulse-glow 3s ease-in-out infinite;
+  }
+
+  /* Stroke animation for ECG logo */
+  @keyframes draw-ecg {
+    from { stroke-dashoffset: 200; }
+    to { stroke-dashoffset: 0; }
+  }
+  .ecg-draw {
+    stroke-dasharray: 200;
+    animation: draw-ecg 1.2s ease-out forwards;
+  }
+
+  /* Count up animation */
+  @keyframes arc-fill {
+    from { stroke-dashoffset: 283; }
+  }
+}
