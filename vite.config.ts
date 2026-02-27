@@ -18,4 +18,11 @@ export default defineConfig(({ mode }) => ({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  optimizeDeps: {
+    include: ['pdfjs-dist', 'tesseract.js'],
+    exclude: ['pdfjs-dist/build/pdf.worker.mjs'],
+  },
+  worker: {
+    format: 'es',
+  },
 }));

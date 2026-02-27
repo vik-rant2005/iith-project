@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useMemo } from "react";
+import React, { useState, useRef, useCallback, useMemo, useSyncExternalStore } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useNavigate } from "react-router-dom";
 import {
@@ -11,21 +11,13 @@ import {
 } from "@/components/ui/accordion";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useToast } from "@/hooks/use-toast";
-import {
-  mockPatient, mockDiagnoses, mockMedications, mockLabValues,
-  mockVitals, mockProcedures, mockDischargeInstructions, mockFollowUp
-} from "@/data/mockData";
+import { subscribe, getStore } from '@/store/extractionStore';
+import { buildFhirValidationData } from "@/lib/fhirBuilder";
 import {
   ResizableHandle, ResizablePanel, ResizablePanelGroup,
 } from "@/components/ui/resizable";
 
 /* ── helpers ── */
-
-function getConfBg(c: number) {
-  if (c >= 80) return "bg-[#10B981]/20 text-[#10B981]";
-  if (c >= 50) return "bg-[#F59E0B]/20 text-[#F59E0B]";
-  return "bg-[#F43F5E]/20 text-[#F43F5E]";
-}
 
 function getConfDot(c: number) {
   if (c >= 80) return "bg-[#10B981]";
@@ -41,12 +33,25 @@ function hasLowConf(items: { confidence: number }[]) {
   return items.some((i) => i.confidence < 50);
 }
 
-/* ── Confidence Badge ── */
-
-function ConfBadge({ value }: { value: number }) {
+/* ── Trust Badge — replaces raw % number with a clinically meaningful label ──
+   >= 80 → Verified  (green)  — AI extracted with high certainty
+   50-79 → Review    (amber)  — extracted but needs human check
+   < 50  → Uncertain (red)   — inferred, must be reviewed
+*/
+function TrustBadge({ value }: { value: number }) {
+  if (value >= 80) return (
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-[#10B981]/15 text-[#10B981] text-[10px] font-medium whitespace-nowrap">
+      ✓ Verified
+    </span>
+  );
+  if (value >= 50) return (
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-[#F59E0B]/15 text-[#F59E0B] text-[10px] font-medium whitespace-nowrap">
+      ⚠ Review
+    </span>
+  );
   return (
-    <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-mono font-medium ${getConfBg(value)}`}>
-      {value}%
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-[#F43F5E]/15 text-[#F43F5E] text-[10px] font-medium whitespace-nowrap">
+      ✗ Uncertain
     </span>
   );
 }
@@ -120,7 +125,7 @@ function FieldRow({ label, value, confidence, codes, onSource, index = 0, accept
           {accepted ? (
             <span className="px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-[#10B981]/20 text-[#10B981]">✓ Accepted</span>
           ) : (
-            <ConfBadge value={confidence} />
+            <TrustBadge value={confidence} />
           )}
           {onSource && (
             <button
@@ -163,10 +168,14 @@ function SectionHeader({ icon, name, count, items }: SectionHeaderProps) {
       <span className="text-[#94A3B8]">{icon}</span>
       <span className="text-sm font-semibold text-[#F1F5F9]">{name}</span>
       <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[#1E2A45] text-[#94A3B8]">{count}</span>
-      <span className={`w-2 h-2 rounded-full ${getConfDot(avg)}`} />
-      {warn && <AlertTriangle className="w-3 h-3 text-[#F43F5E]" />}
+      {items.length > 0 && <span className={`w-2 h-2 rounded-full shrink-0 ${getConfDot(avg)}`} title={`Avg confidence: ${avg}%`} />}
+      {warn && <span title="Some fields need review"><AlertTriangle className="w-3 h-3 text-[#F43F5E]" /></span>}
     </div>
   );
+}
+
+function EmptySection({ label }: { label: string }) {
+  return <div className="px-4 py-5 text-center text-[#94A3B8] text-xs italic">No {label} found in this document.</div>;
 }
 
 /* ── PDF Viewer (Simulated Discharge Summary) ── */
@@ -177,6 +186,18 @@ function PDFViewer({ activeHighlight, onHighlightClick }: {
 }) {
   const [zoom, setZoom] = useState(100);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // PDFViewer needs its own store subscription for extracted data
+  const storeState = useSyncExternalStore(subscribe, getStore);
+  const extracted = storeState.extractedData;
+  const uploadedFileName = storeState.uploadedFileName;
+
+  const patient = extracted?.patient ?? null;
+  const diagnoses = extracted?.diagnoses ?? [];
+  const medications = extracted?.medications ?? [];
+  const vitals = extracted?.vitals ?? [];
+  const labValues = extracted?.labValues ?? [];
+  const procedures = extracted?.procedures ?? [];
 
   const Highlight = ({ id, color, borderColor, children }: {
     id: string; color: string; borderColor: string; children: React.ReactNode;
@@ -207,7 +228,7 @@ function PDFViewer({ activeHighlight, onHighlightClick }: {
     <div className="flex flex-col h-full bg-[#0F1629] rounded-lg overflow-hidden" style={{ boxShadow: "0 0 0 1px #1E2A45, 0 4px 24px rgba(0,0,0,0.4)" }}>
       {/* Toolbar */}
       <div className="flex items-center justify-between px-4 py-2.5 bg-[#151D35] border-b border-[#1E2A45]">
-        <span className="text-xs font-medium text-[#F1F5F9]">Source Document</span>
+        <span className="text-xs font-medium text-[#F1F5F9] truncate max-w-[180px]">{uploadedFileName ?? 'Source Document'}</span>
         <span className="text-xs text-[#94A3B8]">Page 1 of 3</span>
         <div className="flex items-center gap-2">
           <button onClick={() => setZoom(Math.max(50, zoom - 10))} className="text-[#94A3B8] hover:text-[#F1F5F9] transition-colors">
@@ -234,205 +255,348 @@ function PDFViewer({ activeHighlight, onHighlightClick }: {
           }}
         >
           <div className="p-8 text-[13px] leading-relaxed font-serif">
-            {/* Hospital Letterhead */}
-            <div className="text-center border-b-2 border-gray-400 pb-4 mb-5">
-              <div className="text-lg font-bold tracking-wide text-gray-900">ALL INDIA INSTITUTE OF MEDICAL SCIENCES</div>
-              <div className="text-xs text-gray-500 mt-0.5">Ansari Nagar, New Delhi – 110029</div>
-              <div className="text-xs text-gray-500">Department of General Medicine</div>
-              <div className="text-sm font-bold text-indigo-800 mt-2 tracking-wider">DISCHARGE SUMMARY</div>
-            </div>
+            {!extracted ? (
+              <>
+                {/* ── Demo mode: show mock AIIMS document ── */}
+                {/* Hospital Letterhead */}
+                <div className="text-center border-b-2 border-gray-400 pb-4 mb-5">
+                  <div className="text-lg font-bold tracking-wide text-gray-900">ALL INDIA INSTITUTE OF MEDICAL SCIENCES</div>
+                  <div className="text-xs text-gray-500 mt-0.5">Ansari Nagar, New Delhi – 110029</div>
+                  <div className="text-xs text-gray-500">Department of General Medicine</div>
+                  <div className="text-sm font-bold text-indigo-800 mt-2 tracking-wider">DISCHARGE SUMMARY</div>
+                </div>
 
-            {/* Patient Demographics Table */}
-            <table className="w-full text-xs mb-5 border border-gray-300" cellPadding={6}>
-              <tbody>
-                <tr className="border-b border-gray-300">
-                  <td className="font-semibold text-gray-600 w-1/4 bg-gray-100">Patient Name</td>
-                  <td className="w-1/4"><Highlight id="patient-name" color="#10B98133" borderColor="#10B981">{mockPatient.name}</Highlight></td>
-                  <td className="font-semibold text-gray-600 w-1/4 bg-gray-100">Age / Sex</td>
-                  <td className="w-1/4">{mockPatient.age}Y / {mockPatient.gender}</td>
-                </tr>
-                <tr className="border-b border-gray-300">
-                  <td className="font-semibold text-gray-600 bg-gray-100">ABHA ID</td>
-                  <td className="font-mono text-xs">{mockPatient.abha}</td>
-                  <td className="font-semibold text-gray-600 bg-gray-100">Blood Group</td>
-                  <td>{mockPatient.bloodGroup}</td>
-                </tr>
-                <tr className="border-b border-gray-300">
-                  <td className="font-semibold text-gray-600 bg-gray-100">Ward / Bed</td>
-                  <td>{mockPatient.ward}</td>
-                  <td className="font-semibold text-gray-600 bg-gray-100">Hospital</td>
-                  <td>{mockPatient.hospital}</td>
-                </tr>
-                <tr className="border-b border-gray-300">
-                  <td className="font-semibold text-gray-600 bg-gray-100">Date of Admission</td>
-                  <td>{mockPatient.admission}</td>
-                  <td className="font-semibold text-gray-600 bg-gray-100">Date of Discharge</td>
-                  <td>{mockPatient.discharge}</td>
-                </tr>
-                <tr>
-                  <td className="font-semibold text-gray-600 bg-gray-100">Attending Physician</td>
-                  <td>{mockPatient.attending}, {mockPatient.attendingSpecialty}</td>
-                  <td className="font-semibold text-gray-600 bg-gray-100">Resident</td>
-                  <td>{mockPatient.resident}</td>
-                </tr>
-              </tbody>
-            </table>
-
-            {/* Chief Complaint */}
-            <div className="mb-5">
-              <div className="font-bold text-gray-800 text-sm mb-1 border-b border-gray-300 pb-1">CHIEF COMPLAINT</div>
-              <p className="text-gray-700">
-                <Highlight id="chief-complaint" color="#10B98133" borderColor="#10B981">
-                  {mockPatient.chiefComplaint}
-                </Highlight>
-              </p>
-            </div>
-
-            {/* History of Present Illness */}
-            <div className="mb-5">
-              <div className="font-bold text-gray-800 text-sm mb-1 border-b border-gray-300 pb-1">HISTORY OF PRESENT ILLNESS</div>
-              <p className="text-gray-700">
-                A 45-year-old male patient presented with complaints of progressive fatigue, breathlessness on exertion (NYHA Class II), and bilateral pedal oedema of 3 weeks duration. Patient is a known case of Type 2 Diabetes Mellitus for 8 years and Hypertension for 5 years, on irregular medication. He reports decreased urine output and nocturia (2-3 episodes/night). No history of chest pain, orthopnoea, or PND. No history of haematuria or dysuria.
-              </p>
-            </div>
-
-            {/* Past History */}
-            <div className="mb-5">
-              <div className="font-bold text-gray-800 text-sm mb-1 border-b border-gray-300 pb-1">PAST HISTORY</div>
-              <p className="text-gray-700">
-                Known case of Type 2 Diabetes Mellitus – 8 years (on OHA, irregular). Hypertension – 5 years. No known drug allergies. No prior surgical history. Non-smoker, occasional alcohol use.
-              </p>
-            </div>
-
-            {/* Physical Examination */}
-            <div className="mb-5">
-              <div className="font-bold text-gray-800 text-sm mb-1 border-b border-gray-300 pb-1">PHYSICAL EXAMINATION</div>
-              <p className="text-gray-700">
-                General: Conscious, oriented, afebrile, pallor ++ . Vitals: BP {mockVitals[0].value}, Pulse {mockVitals[1].value}, SpO₂ {mockVitals[2].value}, Temp {mockVitals[3].value}. CVS: S1S2 normal, no murmurs. RS: Bilateral air entry equal, occasional basal crepitations. P/A: Soft, non-tender, no organomegaly. CNS: No focal neurological deficit. Extremities: Bilateral pedal oedema +, non-pitting.
-              </p>
-            </div>
-
-            {/* Investigations */}
-            <div className="mb-5">
-              <div className="font-bold text-gray-800 text-sm mb-1 border-b border-gray-300 pb-1">INVESTIGATIONS</div>
-              <table className="w-full text-xs border border-gray-300 mt-2" cellPadding={4}>
-                <thead>
-                  <tr className="bg-gray-200 text-gray-700 font-semibold">
-                    <th className="text-left border-b border-gray-300">Test</th>
-                    <th className="text-left border-b border-gray-300">Value</th>
-                    <th className="text-left border-b border-gray-300">Unit</th>
-                    <th className="text-left border-b border-gray-300">Reference</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {mockLabValues.map((l) => (
-                    <tr key={l.test} className="border-b border-gray-200">
-                      <td className="text-gray-700">{l.test}</td>
-                      <td>
-                        <Highlight
-                          id={`lab-${l.loinc}`}
-                          color="#F59E0B33"
-                          borderColor="#F59E0B"
-                        >
-                          <span className={l.status !== "N" ? "font-bold" : ""}>
-                            {l.value}
-                          </span>
-                        </Highlight>
-                      </td>
-                      <td className="text-gray-500">{l.unit}</td>
-                      <td className="text-gray-500">{l.ref}</td>
+                {/* Patient Demographics Table */}
+                <table className="w-full text-xs mb-5 border border-gray-300" cellPadding={6}>
+                  <tbody>
+                    <tr className="border-b border-gray-300">
+                      <td className="font-semibold text-gray-600 w-1/4 bg-gray-100">Patient Name</td>
+                      <td className="w-1/4"><Highlight id="patient-name" color="#10B98133" borderColor="#10B981">{patient?.name ?? '—'}</Highlight></td>
+                      <td className="font-semibold text-gray-600 w-1/4 bg-gray-100">Age / Sex</td>
+                      <td className="w-1/4">{patient?.age ?? '—'}Y / {patient?.sex ?? '—'}</td>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            {/* Diagnosis */}
-            <div className="mb-5">
-              <div className="font-bold text-gray-800 text-sm mb-1 border-b border-gray-300 pb-1">DIAGNOSIS</div>
-              <ol className="list-decimal pl-5 space-y-1 text-gray-700">
-                {mockDiagnoses.map((d) => (
-                  <li key={d.icd}>
-                    <Highlight id={`dx-${d.icd}`} color="#10B98133" borderColor="#10B981">
-                      {d.name} (ICD: {d.icd})
-                    </Highlight>
-                  </li>
-                ))}
-              </ol>
-            </div>
-
-            {/* Treatment Given / Procedures */}
-            <div className="mb-5">
-              <div className="font-bold text-gray-800 text-sm mb-1 border-b border-gray-300 pb-1">TREATMENT GIVEN</div>
-              <ul className="list-disc pl-5 space-y-1 text-gray-700">
-                {mockProcedures.map((p) => (
-                  <li key={p.snomed}>
-                    <Highlight id={`proc-${p.snomed}`} color="#A855F733" borderColor="#A855F7">
-                      {p.name} ({p.day}){p.findings ? ` — ${p.findings}` : ""}
-                    </Highlight>
-                  </li>
-                ))}
-              </ul>
-            </div>
-
-            {/* Discharge Medications */}
-            <div className="mb-5">
-              <div className="font-bold text-gray-800 text-sm mb-1 border-b border-gray-300 pb-1">DISCHARGE MEDICATIONS</div>
-              <table className="w-full text-xs border border-gray-300 mt-2" cellPadding={4}>
-                <thead>
-                  <tr className="bg-gray-200 text-gray-700 font-semibold">
-                    <th className="text-left border-b border-gray-300">Medication</th>
-                    <th className="text-left border-b border-gray-300">Dosage</th>
-                    <th className="text-left border-b border-gray-300">Route</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {mockMedications.map((m) => (
-                    <tr key={m.name} className="border-b border-gray-200">
-                      <td>
-                        <Highlight id={`med-${m.name.split(" ")[0].toLowerCase()}`} color="#6366F133" borderColor="#6366F1">
-                          {m.name}
-                        </Highlight>
-                      </td>
-                      <td className="text-gray-600">{m.dosage}</td>
-                      <td className="text-gray-600">{m.route}</td>
+                    <tr className="border-b border-gray-300">
+                      <td className="font-semibold text-gray-600 bg-gray-100">ABHA ID</td>
+                      <td className="font-mono text-xs">{patient?.abha ?? '—'}</td>
+                      <td className="font-semibold text-gray-600 bg-gray-100">Blood Group</td>
+                      <td>{patient?.bloodGroup ?? '—'}</td>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                    <tr className="border-b border-gray-300">
+                      <td className="font-semibold text-gray-600 bg-gray-100">Ward / Bed</td>
+                      <td>{patient?.ward ?? '—'}</td>
+                      <td className="font-semibold text-gray-600 bg-gray-100">Hospital</td>
+                      <td>{patient?.hospital ?? '—'}</td>
+                    </tr>
+                    <tr className="border-b border-gray-300">
+                      <td className="font-semibold text-gray-600 bg-gray-100">Date of Admission</td>
+                      <td>{patient?.admission ?? '—'}</td>
+                      <td className="font-semibold text-gray-600 bg-gray-100">Date of Discharge</td>
+                      <td>{patient?.discharge ?? '—'}</td>
+                    </tr>
+                    <tr>
+                      <td className="font-semibold text-gray-600 bg-gray-100">Attending Physician</td>
+                      <td>{patient?.attending ?? '—'}</td>
+                      <td className="font-semibold text-gray-600 bg-gray-100">Resident</td>
+                      <td>—</td>
+                    </tr>
+                  </tbody>
+                </table>
 
-            {/* Discharge Instructions */}
-            <div className="mb-5">
-              <div className="font-bold text-gray-800 text-sm mb-1 border-b border-gray-300 pb-1">DISCHARGE INSTRUCTIONS</div>
-              <ul className="list-disc pl-5 space-y-1 text-gray-700">
-                <li>Low salt diet (&lt;2g/day), diabetic diet</li>
-                <li>Fluid restriction 1.5L/day</li>
-                <li>Monitor BP twice daily</li>
-                <li>Avoid NSAIDs</li>
-              </ul>
-            </div>
+                {/* Chief Complaint */}
+                <div className="mb-5">
+                  <div className="font-bold text-gray-800 text-sm mb-1 border-b border-gray-300 pb-1">CHIEF COMPLAINT</div>
+                  <p className="text-gray-700">
+                    <Highlight id="chief-complaint" color="#10B98133" borderColor="#10B981">
+                      {patient?.chiefComplaint ?? '—'}
+                    </Highlight>
+                  </p>
+                </div>
 
-            {/* Follow-Up */}
-            <div className="mb-5">
-              <div className="font-bold text-gray-800 text-sm mb-1 border-b border-gray-300 pb-1">FOLLOW-UP</div>
-              <ul className="list-disc pl-5 space-y-1 text-gray-700">
-                <li>Nephrology OPD in 2 weeks</li>
-                <li>Repeat labs (CBC, RFT, HbA1c, Urine ACR) in 4 weeks</li>
-              </ul>
-            </div>
+                {/* History of Present Illness */}
+                <div className="mb-5">
+                  <div className="font-bold text-gray-800 text-sm mb-1 border-b border-gray-300 pb-1">HISTORY OF PRESENT ILLNESS</div>
+                  <p className="text-gray-700">
+                    A 45-year-old male patient presented with complaints of progressive fatigue, breathlessness on exertion (NYHA Class II), and bilateral pedal oedema of 3 weeks duration. Patient is a known case of Type 2 Diabetes Mellitus for 8 years and Hypertension for 5 years, on irregular medication. He reports decreased urine output and nocturia (2-3 episodes/night). No history of chest pain, orthopnoea, or PND. No history of haematuria or dysuria.
+                  </p>
+                </div>
 
-            {/* Signatures */}
-            <div className="mt-8 pt-4 border-t border-gray-300 flex justify-between text-xs text-gray-600">
-              <div>
-                <div className="font-semibold">{mockPatient.resident}</div>
-                <div>Junior Resident, General Medicine</div>
-              </div>
-              <div className="text-right">
-                <div className="font-semibold">{mockPatient.attending}</div>
-                <div>{mockPatient.attendingSpecialty}</div>
-              </div>
-            </div>
+                {/* Past History */}
+                <div className="mb-5">
+                  <div className="font-bold text-gray-800 text-sm mb-1 border-b border-gray-300 pb-1">PAST HISTORY</div>
+                  <p className="text-gray-700">
+                    Known case of Type 2 Diabetes Mellitus – 8 years (on OHA, irregular). Hypertension – 5 years. No known drug allergies. No prior surgical history. Non-smoker, occasional alcohol use.
+                  </p>
+                </div>
+
+                {/* Physical Examination */}
+                <div className="mb-5">
+                  <div className="font-bold text-gray-800 text-sm mb-1 border-b border-gray-300 pb-1">PHYSICAL EXAMINATION</div>
+                  <p className="text-gray-700">
+                    General: Conscious, oriented, afebrile, pallor ++ . Vitals: BP {vitals[0]?.value ?? '—'}, Pulse {vitals[1]?.value ?? '—'}, SpO₂ {vitals[2]?.value ?? '—'}, Temp {vitals[3]?.value ?? '—'}. CVS: S1S2 normal, no murmurs. RS: Bilateral air entry equal, occasional basal crepitations. P/A: Soft, non-tender, no organomegaly. CNS: No focal neurological deficit. Extremities: Bilateral pedal oedema +, non-pitting.
+                  </p>
+                </div>
+
+                {/* Investigations */}
+                <div className="mb-5">
+                  <div className="font-bold text-gray-800 text-sm mb-1 border-b border-gray-300 pb-1">INVESTIGATIONS</div>
+                  <table className="w-full text-xs border border-gray-300 mt-2" cellPadding={4}>
+                    <thead>
+                      <tr className="bg-gray-200 text-gray-700 font-semibold">
+                        <th className="text-left border-b border-gray-300">Test</th>
+                        <th className="text-left border-b border-gray-300">Value</th>
+                        <th className="text-left border-b border-gray-300">Unit</th>
+                        <th className="text-left border-b border-gray-300">Reference</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {labValues.map((l) => (
+                        <tr key={l.test} className="border-b border-gray-200">
+                          <td className="text-gray-700">{l.test}</td>
+                          <td>
+                            <Highlight
+                              id={`lab-${l.loinc}`}
+                              color="#F59E0B33"
+                              borderColor="#F59E0B"
+                            >
+                              <span className={l.status !== "N" ? "font-bold" : ""}>
+                                {l.value}
+                              </span>
+                            </Highlight>
+                          </td>
+                          <td className="text-gray-500">{l.unit}</td>
+                          <td className="text-gray-500">{l.ref}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Diagnosis */}
+                <div className="mb-5">
+                  <div className="font-bold text-gray-800 text-sm mb-1 border-b border-gray-300 pb-1">DIAGNOSIS</div>
+                  <ol className="list-decimal pl-5 space-y-1 text-gray-700">
+                    {diagnoses.map((d) => (
+                      <li key={d.icd}>
+                        <Highlight id={`dx-${d.icd}`} color="#10B98133" borderColor="#10B981">
+                          {d.name} (ICD: {d.icd})
+                        </Highlight>
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+
+                {/* Treatment Given / Procedures */}
+                <div className="mb-5">
+                  <div className="font-bold text-gray-800 text-sm mb-1 border-b border-gray-300 pb-1">TREATMENT GIVEN</div>
+                  <ul className="list-disc pl-5 space-y-1 text-gray-700">
+                    {procedures.map((p) => (
+                      <li key={p.snomed}>
+                        <Highlight id={`proc-${p.snomed}`} color="#A855F733" borderColor="#A855F7">
+                          {p.name} ({p.day}){p.findings ? ` — ${p.findings}` : ""}
+                        </Highlight>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+
+                {/* Discharge Medications */}
+                <div className="mb-5">
+                  <div className="font-bold text-gray-800 text-sm mb-1 border-b border-gray-300 pb-1">DISCHARGE MEDICATIONS</div>
+                  <table className="w-full text-xs border border-gray-300 mt-2" cellPadding={4}>
+                    <thead>
+                      <tr className="bg-gray-200 text-gray-700 font-semibold">
+                        <th className="text-left border-b border-gray-300">Medication</th>
+                        <th className="text-left border-b border-gray-300">Dosage</th>
+                        <th className="text-left border-b border-gray-300">Route</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {medications.map((m) => (
+                        <tr key={m.name} className="border-b border-gray-200">
+                          <td>
+                            <Highlight id={`med-${m.name.split(" ")[0].toLowerCase()}`} color="#6366F133" borderColor="#6366F1">
+                              {m.name}
+                            </Highlight>
+                          </td>
+                          <td className="text-gray-600">{m.dosage}</td>
+                          <td className="text-gray-600">{m.route}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Discharge Instructions */}
+                <div className="mb-5">
+                  <div className="font-bold text-gray-800 text-sm mb-1 border-b border-gray-300 pb-1">DISCHARGE INSTRUCTIONS</div>
+                  <ul className="list-disc pl-5 space-y-1 text-gray-700">
+                    <li>Low salt diet (&lt;2g/day), diabetic diet</li>
+                    <li>Fluid restriction 1.5L/day</li>
+                    <li>Monitor BP twice daily</li>
+                    <li>Avoid NSAIDs</li>
+                  </ul>
+                </div>
+
+                {/* Follow-Up */}
+                <div className="mb-5">
+                  <div className="font-bold text-gray-800 text-sm mb-1 border-b border-gray-300 pb-1">FOLLOW-UP</div>
+                  <ul className="list-disc pl-5 space-y-1 text-gray-700">
+                    <li>Nephrology OPD in 2 weeks</li>
+                    <li>Repeat labs (CBC, RFT, HbA1c, Urine ACR) in 4 weeks</li>
+                  </ul>
+                </div>
+
+                {/* Signatures */}
+                <div className="mt-8 pt-4 border-t border-gray-300 flex justify-between text-xs text-gray-600">
+                  <div>
+                    <div className="font-semibold">—</div>
+                    <div>Junior Resident</div>
+                  </div>
+                  <div className="text-right">
+                    <div className="font-semibold">{patient?.attending ?? '—'}</div>
+                    <div>Attending Physician</div>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                {/* ── Real extraction mode: show actual extracted text as structured doc ── */}
+                <div className="text-center border-b-2 border-gray-400 pb-4 mb-5">
+                  <div className="text-base font-bold tracking-wide text-gray-900">
+                    {patient.hospital || 'Hospital / Medical Centre'}
+                  </div>
+                  <div className="text-sm font-bold text-indigo-800 mt-2 tracking-wider">DISCHARGE SUMMARY</div>
+                  <div className="text-xs text-gray-500 mt-1">
+                    {uploadedFileName ?? 'Uploaded Document'}
+                  </div>
+                </div>
+
+                <table className="w-full text-xs mb-5 border border-gray-300" cellPadding={6}>
+                  <tbody>
+                    <tr className="border-b border-gray-300">
+                      <td className="font-semibold text-gray-600 bg-gray-100 w-1/4">Patient Name</td>
+                      <td><Highlight id="patient-name" color="#10B98133" borderColor="#10B981">{patient.name || '—'}</Highlight></td>
+                      <td className="font-semibold text-gray-600 bg-gray-100 w-1/4">Age / Sex</td>
+                      <td>{patient.age} / {patient.sex}</td>
+                    </tr>
+                    <tr className="border-b border-gray-300">
+                      <td className="font-semibold text-gray-600 bg-gray-100">ABHA ID</td>
+                      <td className="font-mono">{patient.abha || '—'}</td>
+                      <td className="font-semibold text-gray-600 bg-gray-100">Blood Group</td>
+                      <td>{patient.bloodGroup || '—'}</td>
+                    </tr>
+                    <tr className="border-b border-gray-300">
+                      <td className="font-semibold text-gray-600 bg-gray-100">Ward / Bed</td>
+                      <td>{patient.ward || '—'}</td>
+                      <td className="font-semibold text-gray-600 bg-gray-100">Attending</td>
+                      <td>{patient.attending || '—'}</td>
+                    </tr>
+                    <tr>
+                      <td className="font-semibold text-gray-600 bg-gray-100">Admission</td>
+                      <td>{patient.admission || '—'}</td>
+                      <td className="font-semibold text-gray-600 bg-gray-100">Discharge</td>
+                      <td>{patient.discharge || '—'}</td>
+                    </tr>
+                  </tbody>
+                </table>
+
+                {patient.chiefComplaint && (
+                  <div className="mb-4">
+                    <div className="font-bold text-gray-800 text-sm mb-1 border-b border-gray-300 pb-1">CHIEF COMPLAINT</div>
+                    <p className="text-gray-700"><Highlight id="chief-complaint" color="#10B98133" borderColor="#10B981">{patient.chiefComplaint}</Highlight></p>
+                  </div>
+                )}
+
+                {diagnoses.length > 0 && (
+                  <div className="mb-4">
+                    <div className="font-bold text-gray-800 text-sm mb-1 border-b border-gray-300 pb-1">DIAGNOSIS</div>
+                    <ol className="list-decimal pl-5 space-y-1 text-gray-700">
+                      {diagnoses.map((d) => (
+                        <li key={d.icd || d.name}>
+                          <Highlight id={`dx-${d.icd || d.name}`} color="#10B98133" borderColor="#10B981">
+                            {d.name}{d.icd ? ` (ICD: ${d.icd})` : ''}
+                          </Highlight>
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
+                )}
+
+                {procedures.length > 0 && (
+                  <div className="mb-4">
+                    <div className="font-bold text-gray-800 text-sm mb-1 border-b border-gray-300 pb-1">PROCEDURES</div>
+                    <ul className="list-disc pl-5 space-y-1 text-gray-700">
+                      {procedures.map((p) => (
+                        <li key={p.snomed || p.name}>
+                          <Highlight id={`proc-${p.snomed || p.name}`} color="#A855F733" borderColor="#A855F7">
+                            {p.name}{p.day ? ` (${p.day})` : ''}{p.findings ? ` — ${p.findings}` : ''}
+                          </Highlight>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {medications.length > 0 && (
+                  <div className="mb-4">
+                    <div className="font-bold text-gray-800 text-sm mb-1 border-b border-gray-300 pb-1">MEDICATIONS</div>
+                    <table className="w-full text-xs border border-gray-300" cellPadding={4}>
+                      <thead>
+                        <tr className="bg-gray-200 text-gray-700 font-semibold">
+                          <th className="text-left border-b border-gray-300">Medication</th>
+                          <th className="text-left border-b border-gray-300">Dosage</th>
+                          <th className="text-left border-b border-gray-300">Route</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {medications.map((m) => (
+                          <tr key={m.name} className="border-b border-gray-200">
+                            <td><Highlight id={`med-${m.name.split(' ')[0].toLowerCase()}`} color="#6366F133" borderColor="#6366F1">{m.name}</Highlight></td>
+                            <td className="text-gray-600">{m.dosage}</td>
+                            <td className="text-gray-600">{m.route}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {labValues.length > 0 && (
+                  <div className="mb-4">
+                    <div className="font-bold text-gray-800 text-sm mb-1 border-b border-gray-300 pb-1">INVESTIGATIONS</div>
+                    <table className="w-full text-xs border border-gray-300" cellPadding={4}>
+                      <thead>
+                        <tr className="bg-gray-200 text-gray-700 font-semibold">
+                          <th className="text-left border-b border-gray-300">Test</th>
+                          <th className="text-left border-b border-gray-300">Value</th>
+                          <th className="text-left border-b border-gray-300">Unit</th>
+                          <th className="text-left border-b border-gray-300">Reference</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {labValues.map((l) => (
+                          <tr key={l.test} className="border-b border-gray-200">
+                            <td className="text-gray-700">{l.test}</td>
+                            <td><Highlight id={`lab-${l.loinc || l.test}`} color="#F59E0B33" borderColor="#F59E0B"><span className={l.status !== 'N' ? 'font-bold' : ''}>{l.value}</span></Highlight></td>
+                            <td className="text-gray-500">{l.unit}</td>
+                            <td className="text-gray-500">{l.ref}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {vitals.length > 0 && (
+                  <div className="mb-4">
+                    <div className="font-bold text-gray-800 text-sm mb-1 border-b border-gray-300 pb-1">VITALS</div>
+                    <p className="text-gray-700 text-xs">
+                      {vitals.map(v => `${v.name}: ${v.value}`).join(' · ')}
+                    </p>
+                  </div>
+                )}
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -442,26 +606,71 @@ function PDFViewer({ activeHighlight, onHighlightClick }: {
 
 /* ── Main Component ── */
 
+class ErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: string | null }
+> {
+  state = { error: null as string | null };
+  static getDerivedStateFromError(e: Error) { return { error: e.message }; }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="flex flex-col items-center justify-center h-screen gap-4 bg-[#080D1A]">
+          <div className="text-[#F43F5E] text-lg font-semibold">Render Error</div>
+          <div className="text-[#94A3B8] text-sm max-w-lg text-center font-mono">{this.state.error}</div>
+          <button onClick={() => window.location.href = '/'} className="px-4 py-2 rounded-md bg-[#4F46E5] text-white text-sm">Back to Dashboard</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function ClinicalReview() {
+  return (
+    <ErrorBoundary>
+      <ClinicalReviewInner />
+    </ErrorBoundary>
+  );
+}
+
+function ClinicalReviewInner() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const [activeHighlight, setActiveHighlight] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [acceptedFields, setAcceptedFields] = useState<Set<string>>(new Set());
 
+  // Subscribe to extraction store
+  const storeState = useSyncExternalStore(subscribe, getStore);
+  const extracted = storeState.extractedData;
+  const isExtractingData = storeState.isExtracting;
+  const extractionProgress = storeState.extractionProgress;
+  const uploadedFileName = storeState.uploadedFileName;
+
+  // Derive data from extracted result — NO mock fallbacks, show real data only
+  const patient = extracted?.patient ?? null;
+  const diagnoses = extracted?.diagnoses ?? [];
+  const medications = extracted?.medications ?? [];
+  const vitals = extracted?.vitals ?? [];
+  const labValues = extracted?.labValues ?? [];
+  const procedures = extracted?.procedures ?? [];
+  const dischargeInstructions = extracted?.dischargeInstructions ?? [];
+  const followUp = extracted?.followUp ?? [];
+
   // Collect all fields with their IDs and confidences for the Accept All logic
   const allFields = useMemo(() => {
     const fields: { id: string; confidence: number }[] = [];
     fields.push({ id: 'chief-complaint', confidence: 93 });
-    mockDiagnoses.forEach(d => fields.push({ id: `dx-${d.icd}`, confidence: d.confidence }));
-    mockProcedures.forEach(p => fields.push({ id: `proc-${p.snomed}`, confidence: p.confidence }));
-    mockMedications.forEach(m => fields.push({ id: `med-${m.name}`, confidence: m.confidence }));
-    mockLabValues.forEach(l => fields.push({ id: `lab-${l.loinc}`, confidence: l.confidence }));
-    mockVitals.forEach(v => fields.push({ id: `vital-${v.name}`, confidence: v.confidence }));
-    mockDischargeInstructions.forEach(d => fields.push({ id: `discharge-${d.label}`, confidence: d.confidence }));
-    mockFollowUp.forEach(f => fields.push({ id: `followup-${f.label}`, confidence: f.confidence }));
+    diagnoses.forEach(d => fields.push({ id: `dx-${d.icd}`, confidence: d.confidence }));
+    procedures.forEach(p => fields.push({ id: `proc-${p.snomed}`, confidence: p.confidence }));
+    medications.forEach(m => fields.push({ id: `med-${m.name}`, confidence: m.confidence }));
+    labValues.forEach(l => fields.push({ id: `lab-${l.loinc}`, confidence: l.confidence }));
+    vitals.forEach(v => fields.push({ id: `vital-${v.name}`, confidence: v.confidence }));
+    dischargeInstructions.forEach(d => fields.push({ id: `discharge-${d.label}`, confidence: d.confidence }));
+    followUp.forEach(f => fields.push({ id: `followup-${f.label}`, confidence: f.confidence }));
     return fields;
-  }, []);
+  }, [diagnoses, procedures, medications, labValues, vitals, dischargeInstructions, followUp]);
 
   const totalFields = allFields.length;
   const needReview = Math.max(0, totalFields - acceptedFields.size);
@@ -484,11 +693,16 @@ export default function ClinicalReview() {
 
   const handleGenerate = () => {
     setIsGenerating(true);
+
+    // Calculate total resources generated beforehand to show in toast
+    const validationData = buildFhirValidationData(extracted);
+    const count = validationData.totalResources;
+
     setTimeout(() => {
       setIsGenerating(false);
       toast({
         title: "FHIR Bundle generated",
-        description: "31 resources created successfully.",
+        description: `${count} resources created successfully.`,
       });
       navigate("/validate");
     }, 2000);
@@ -574,7 +788,7 @@ export default function ClinicalReview() {
                     <AccordionContent className="px-2 py-2 bg-[#080D1A]">
                       <FieldRow
                         label="Chief Complaint"
-                        value={mockPatient.chiefComplaint}
+                        value={patient.chiefComplaint}
                         confidence={93}
                         onSource={() => scrollToHighlight("chief-complaint")}
                         accepted={acceptedFields.has('chief-complaint')}
@@ -584,87 +798,93 @@ export default function ClinicalReview() {
                   </AccordionItem>
 
                   {/* Diagnoses */}
-                  <AccordionItem value="diagnoses" className="border border-[#1E2A45] rounded-lg overflow-hidden">
-                    <AccordionTrigger className="px-4 py-3 bg-[#0F1629] hover:bg-[#151D35] text-sm">
-                      <SectionHeader
-                        icon={<Heart className="w-4 h-4" />}
-                        name="Diagnoses"
-                        count={mockDiagnoses.length}
-                        items={mockDiagnoses}
-                      />
-                    </AccordionTrigger>
-                    <AccordionContent className="px-2 py-2 bg-[#080D1A]">
-                      {mockDiagnoses.map((d, i) => (
-                        <FieldRow
-                          key={d.icd}
-                          label="Diagnosis"
-                          value={d.name}
-                          confidence={d.confidence}
-                          index={i}
-                          codes={[
-                            { system: "ICD", code: d.icd, description: `ICD-10: ${d.name}` },
-                            { system: "SNOMED", code: d.snomed, description: `SNOMED CT: ${d.name}` },
-                          ]}
-                          onSource={() => scrollToHighlight(`dx-${d.icd}`)}
-                          accepted={acceptedFields.has(`dx-${d.icd}`)}
-                          onAccept={() => setAcceptedFields(prev => new Set([...prev, `dx-${d.icd}`]))}
+                  {diagnoses.length > 0 && (
+                    <AccordionItem value="diagnoses" className="border border-[#1E2A45] rounded-lg overflow-hidden">
+                      <AccordionTrigger className="px-4 py-3 bg-[#0F1629] hover:bg-[#151D35] text-sm">
+                        <SectionHeader
+                          icon={<Heart className="w-4 h-4" />}
+                          name="Diagnoses"
+                          count={diagnoses.length}
+                          items={diagnoses}
                         />
-                      ))}
-                    </AccordionContent>
-                  </AccordionItem>
+                      </AccordionTrigger>
+                      <AccordionContent className="px-2 py-2 bg-[#080D1A]">
+                        {diagnoses.map((d, i) => (
+                          <FieldRow
+                            key={d.icd}
+                            label="Diagnosis"
+                            value={d.name}
+                            confidence={d.confidence}
+                            index={i}
+                            codes={[
+                              { system: "ICD", code: d.icd, description: `ICD-10: ${d.name}` },
+                              { system: "SNOMED", code: d.snomed, description: `SNOMED CT: ${d.name}` },
+                            ]}
+                            onSource={() => scrollToHighlight(`dx-${d.icd}`)}
+                            accepted={acceptedFields.has(`dx-${d.icd}`)}
+                            onAccept={() => setAcceptedFields(prev => new Set([...prev, `dx-${d.icd}`]))}
+                          />
+                        ))}
+                      </AccordionContent>
+                    </AccordionItem>
+                  )}
 
                   {/* Procedures */}
-                  <AccordionItem value="procedures" className="border border-[#1E2A45] rounded-lg overflow-hidden">
-                    <AccordionTrigger className="px-4 py-3 bg-[#0F1629] hover:bg-[#151D35] text-sm">
-                      <SectionHeader
-                        icon={<Stethoscope className="w-4 h-4" />}
-                        name="Procedures"
-                        count={mockProcedures.length}
-                        items={mockProcedures}
-                      />
-                    </AccordionTrigger>
-                    <AccordionContent className="px-2 py-2 bg-[#080D1A]">
-                      {mockProcedures.map((p, i) => (
-                        <FieldRow
-                          key={p.snomed}
-                          label={p.day}
-                          value={`${p.name}${p.findings ? ` — ${p.findings}` : ""}`}
-                          confidence={p.confidence}
-                          index={i}
-                          codes={[{ system: "SNOMED", code: p.snomed, description: `SNOMED CT procedure code for ${p.name}` }]}
-                          onSource={() => scrollToHighlight(`proc-${p.snomed}`)}
-                          accepted={acceptedFields.has(`proc-${p.snomed}`)}
-                          onAccept={() => setAcceptedFields(prev => new Set([...prev, `proc-${p.snomed}`]))}
+                  {procedures.length > 0 && (
+                    <AccordionItem value="procedures" className="border border-[#1E2A45] rounded-lg overflow-hidden">
+                      <AccordionTrigger className="px-4 py-3 bg-[#0F1629] hover:bg-[#151D35] text-sm">
+                        <SectionHeader
+                          icon={<Stethoscope className="w-4 h-4" />}
+                          name="Procedures"
+                          count={procedures.length}
+                          items={procedures}
                         />
-                      ))}
-                    </AccordionContent>
-                  </AccordionItem>
+                      </AccordionTrigger>
+                      <AccordionContent className="px-2 py-2 bg-[#080D1A]">
+                        {procedures.map((p, i) => (
+                          <FieldRow
+                            key={p.snomed}
+                            label={p.day}
+                            value={`${p.name}${p.findings ? ` — ${p.findings}` : ""}`}
+                            confidence={p.confidence}
+                            index={i}
+                            codes={[{ system: "SNOMED", code: p.snomed, description: `SNOMED CT procedure code for ${p.name}` }]}
+                            onSource={() => scrollToHighlight(`proc-${p.snomed}`)}
+                            accepted={acceptedFields.has(`proc-${p.snomed}`)}
+                            onAccept={() => setAcceptedFields(prev => new Set([...prev, `proc-${p.snomed}`]))}
+                          />
+                        ))}
+                      </AccordionContent>
+                    </AccordionItem>
+                  )}
 
                   {/* Medications */}
-                  <AccordionItem value="medications" className="border border-[#1E2A45] rounded-lg overflow-hidden">
-                    <AccordionTrigger className="px-4 py-3 bg-[#0F1629] hover:bg-[#151D35] text-sm">
-                      <SectionHeader
-                        icon={<Pill className="w-4 h-4" />}
-                        name="Medications"
-                        count={mockMedications.length}
-                        items={mockMedications}
-                      />
-                    </AccordionTrigger>
-                    <AccordionContent className="px-2 py-2 bg-[#080D1A]">
-                      {mockMedications.map((m, i) => (
-                        <FieldRow
-                          key={m.name}
-                          label={`${m.route} · ${m.dosage}`}
-                          value={m.name}
-                          confidence={m.confidence}
-                          index={i}
-                          onSource={() => scrollToHighlight(`med-${m.name.split(" ")[0].toLowerCase()}`)}
-                          accepted={acceptedFields.has(`med-${m.name}`)}
-                          onAccept={() => setAcceptedFields(prev => new Set([...prev, `med-${m.name}`]))}
+                  {medications.length > 0 && (
+                    <AccordionItem value="medications" className="border border-[#1E2A45] rounded-lg overflow-hidden">
+                      <AccordionTrigger className="px-4 py-3 bg-[#0F1629] hover:bg-[#151D35] text-sm">
+                        <SectionHeader
+                          icon={<Pill className="w-4 h-4" />}
+                          name="Medications"
+                          count={medications.length}
+                          items={medications}
                         />
-                      ))}
-                    </AccordionContent>
-                  </AccordionItem>
+                      </AccordionTrigger>
+                      <AccordionContent className="px-2 py-2 bg-[#080D1A]">
+                        {medications.map((m, i) => (
+                          <FieldRow
+                            key={m.name}
+                            label={`${m.route} · ${m.dosage}`}
+                            value={m.name}
+                            confidence={m.confidence}
+                            index={i}
+                            onSource={() => scrollToHighlight(`med-${m.name.split(" ")[0].toLowerCase()}`)}
+                            accepted={acceptedFields.has(`med-${m.name}`)}
+                            onAccept={() => setAcceptedFields(prev => new Set([...prev, `med-${m.name}`]))}
+                          />
+                        ))}
+                      </AccordionContent>
+                    </AccordionItem>
+                  )}
 
                   {/* Lab Investigations (table) */}
                   <AccordionItem value="labs" className="border border-[#1E2A45] rounded-lg overflow-hidden">
@@ -672,8 +892,8 @@ export default function ClinicalReview() {
                       <SectionHeader
                         icon={<FlaskConical className="w-4 h-4" />}
                         name="Lab Investigations"
-                        count={mockLabValues.length}
-                        items={mockLabValues}
+                        count={labValues.length}
+                        items={labValues}
                       />
                     </AccordionTrigger>
                     <AccordionContent className="px-2 py-2 bg-[#080D1A]">
@@ -691,7 +911,7 @@ export default function ClinicalReview() {
                             </tr>
                           </thead>
                           <tbody>
-                            {mockLabValues.map((l, i) => (
+                            {labValues.map((l, i) => (
                               <tr
                                 key={l.test}
                                 onClick={() => scrollToHighlight(`lab-${l.loinc}`)}
@@ -714,8 +934,8 @@ export default function ClinicalReview() {
                                     {l.status}
                                   </span>
                                 </td>
-                                <td className="px-3 py-2"><ConfBadge value={l.confidence} /></td>
-                                <td className="px-3 py-2"><CodeChip system="LOINC" code={l.loinc} /></td>
+                                <td className="px-3 py-2"><TrustBadge value={l.confidence} /></td>
+                                <td className="px-3 py-2"><CodeChip system="LOINC" code={l.loinc || ''} /></td>
                               </tr>
                             ))}
                           </tbody>
@@ -730,12 +950,12 @@ export default function ClinicalReview() {
                       <SectionHeader
                         icon={<Activity className="w-4 h-4" />}
                         name="Vitals"
-                        count={mockVitals.length}
-                        items={mockVitals}
+                        count={vitals.length}
+                        items={vitals}
                       />
                     </AccordionTrigger>
                     <AccordionContent className="px-2 py-2 bg-[#080D1A]">
-                      {mockVitals.map((v, i) => (
+                      {vitals.map((v, i) => (
                         <FieldRow
                           key={v.name}
                           label={v.name}
@@ -750,54 +970,58 @@ export default function ClinicalReview() {
                   </AccordionItem>
 
                   {/* Discharge Instructions */}
-                  <AccordionItem value="discharge" className="border border-[#1E2A45] rounded-lg overflow-hidden">
-                    <AccordionTrigger className="px-4 py-3 bg-[#0F1629] hover:bg-[#151D35] text-sm">
-                      <SectionHeader
-                        icon={<FileText className="w-4 h-4" />}
-                        name="Discharge Instructions"
-                        count={mockDischargeInstructions.length}
-                        items={mockDischargeInstructions}
-                      />
-                    </AccordionTrigger>
-                    <AccordionContent className="px-2 py-2 bg-[#080D1A]">
-                      {mockDischargeInstructions.map((d, i) => (
-                        <FieldRow
-                          key={d.label}
-                          label={d.label}
-                          value={d.value}
-                          confidence={d.confidence}
-                          index={i}
-                          accepted={acceptedFields.has(`discharge-${d.label}`)}
-                          onAccept={() => setAcceptedFields(prev => new Set([...prev, `discharge-${d.label}`]))}
+                  {dischargeInstructions.length > 0 && (
+                    <AccordionItem value="discharge" className="border border-[#1E2A45] rounded-lg overflow-hidden">
+                      <AccordionTrigger className="px-4 py-3 bg-[#0F1629] hover:bg-[#151D35] text-sm">
+                        <SectionHeader
+                          icon={<FileText className="w-4 h-4" />}
+                          name="Discharge Instructions"
+                          count={dischargeInstructions.length}
+                          items={dischargeInstructions}
                         />
-                      ))}
-                    </AccordionContent>
-                  </AccordionItem>
+                      </AccordionTrigger>
+                      <AccordionContent className="px-2 py-2 bg-[#080D1A]">
+                        {dischargeInstructions.map((d, i) => (
+                          <FieldRow
+                            key={d.label}
+                            label={d.label}
+                            value={d.value}
+                            confidence={d.confidence}
+                            index={i}
+                            accepted={acceptedFields.has(`discharge-${d.label}`)}
+                            onAccept={() => setAcceptedFields(prev => new Set([...prev, `discharge-${d.label}`]))}
+                          />
+                        ))}
+                      </AccordionContent>
+                    </AccordionItem>
+                  )}
 
                   {/* Follow-Up */}
-                  <AccordionItem value="followup" className="border border-[#1E2A45] rounded-lg overflow-hidden">
-                    <AccordionTrigger className="px-4 py-3 bg-[#0F1629] hover:bg-[#151D35] text-sm">
-                      <SectionHeader
-                        icon={<Calendar className="w-4 h-4" />}
-                        name="Follow-Up"
-                        count={mockFollowUp.length}
-                        items={mockFollowUp}
-                      />
-                    </AccordionTrigger>
-                    <AccordionContent className="px-2 py-2 bg-[#080D1A]">
-                      {mockFollowUp.map((f, i) => (
-                        <FieldRow
-                          key={f.label}
-                          label={f.label}
-                          value={f.value}
-                          confidence={f.confidence}
-                          index={i}
-                          accepted={acceptedFields.has(`followup-${f.label}`)}
-                          onAccept={() => setAcceptedFields(prev => new Set([...prev, `followup-${f.label}`]))}
+                  {followUp.length > 0 && (
+                    <AccordionItem value="followup" className="border border-[#1E2A45] rounded-lg overflow-hidden">
+                      <AccordionTrigger className="px-4 py-3 bg-[#0F1629] hover:bg-[#151D35] text-sm">
+                        <SectionHeader
+                          icon={<Calendar className="w-4 h-4" />}
+                          name="Follow-Up"
+                          count={followUp.length}
+                          items={followUp}
                         />
-                      ))}
-                    </AccordionContent>
-                  </AccordionItem>
+                      </AccordionTrigger>
+                      <AccordionContent className="px-2 py-2 bg-[#080D1A]">
+                        {followUp.map((f, i) => (
+                          <FieldRow
+                            key={f.label}
+                            label={f.label}
+                            value={f.value}
+                            confidence={f.confidence}
+                            index={i}
+                            accepted={acceptedFields.has(`followup-${f.label}`)}
+                            onAccept={() => setAcceptedFields(prev => new Set([...prev, `followup-${f.label}`]))}
+                          />
+                        ))}
+                      </AccordionContent>
+                    </AccordionItem>
+                  )}
                 </Accordion>
               </div>
 
@@ -812,7 +1036,7 @@ export default function ClinicalReview() {
                   <ChevronLeft className="w-4 h-4" /> Back to Upload
                 </motion.button>
                 <div className="text-xs text-[#94A3B8] hidden lg:block">
-                  Avg Confidence: <span className="text-[#10B981] font-medium">92%</span> · {totalFields}/{totalFields} fields extracted
+                  Avg Confidence: <span className="text-[#10B981] font-medium">{extracted ? `${extracted.overallConfidence}%` : '92%'}</span> · {totalFields}/{totalFields} fields extracted
                 </div>
                 <motion.button
                   whileHover={{ scale: 1.02 }}
@@ -837,7 +1061,44 @@ export default function ClinicalReview() {
         </ResizablePanelGroup>
       </div>
 
-      {/* Loading overlay */}
+      {/* Extraction overlay */}
+      <AnimatePresence>
+        {isExtractingData && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              className="flex flex-col gap-4 p-8 rounded-xl bg-[#151D35] border border-[#1E2A45] max-w-md w-full"
+            >
+              <div className="flex items-center gap-3">
+                <Loader2 className="w-6 h-6 text-[#4F46E5] animate-spin shrink-0" />
+                <div>
+                  <div className="text-sm font-semibold text-[#F1F5F9]">Ollama is extracting clinical data...</div>
+                  <div className="text-xs text-[#94A3B8] mt-0.5">Using local LLM — no data leaves your machine</div>
+                </div>
+              </div>
+              <div className="rounded-md bg-[#080D1A] border border-[#1E2A45] p-3 max-h-48 overflow-auto font-mono text-[10px] text-[#10B981] whitespace-pre-wrap">
+                {extractionProgress
+                  ? extractionProgress.split('\n').slice(-8).join('\n')
+                  : 'Initializing...'}
+              </div>
+              <div className="text-[10px] text-[#94A3B8] text-center">
+                {extractionProgress.includes('OCR')
+                  ? '🔍 OCR mode — scanned PDF detected (may take 1–2 min)'
+                  : '⚡ Text mode — digital PDF (fast)'}
+                {' · Local Ollama · No data leaves your machine'}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* FHIR generation overlay */}
       <AnimatePresence>
         {isGenerating && (
           <motion.div
@@ -853,7 +1114,7 @@ export default function ClinicalReview() {
             >
               <Loader2 className="w-10 h-10 text-[#4F46E5] animate-spin" />
               <div className="text-lg font-semibold text-[#F1F5F9]">Generating FHIR Bundle</div>
-              <div className="text-sm text-[#94A3B8]">Converting 61 fields into 31 FHIR resources...</div>
+              <div className="text-sm text-[#94A3B8]">Converting {totalFields} fields into FHIR resources...</div>
             </motion.div>
           </motion.div>
         )}

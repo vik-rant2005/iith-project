@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useSyncExternalStore, useMemo } from "react";
 import { motion } from "framer-motion";
 import { useNavigate } from "react-router-dom";
 import {
@@ -6,9 +6,10 @@ import {
   ArrowRight, ArrowLeft, User, Calendar, Heart, Pill, Activity,
   Stethoscope, Building2, UserCheck, Grid3X3, Shield, Layers
 } from "lucide-react";
-import { mockComplianceItems, mockValidationIssues, mockResourceTree } from "@/data/mockData";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
+import { subscribe, getStore } from "@/store/extractionStore";
+import { buildFhirValidationData, TreeNode, ValidationIssue } from "@/lib/fhirBuilder";
 
 /* ── Animated Health Gauge ── */
 
@@ -82,15 +83,6 @@ const resourceIcons: Record<string, React.ComponentType<{ className?: string }>>
 
 /* ── Resource Tree Node ── */
 
-interface TreeNode {
-  type: string;
-  id: string;
-  status: "pass" | "warning" | "fail";
-  label?: string;
-  resourceCount?: number;
-  children?: TreeNode[];
-}
-
 function ResourceTreeNode({ node, depth = 0 }: { node: TreeNode; depth?: number }) {
   const [open, setOpen] = useState(depth === 0);
   const [showDetails, setShowDetails] = useState(false);
@@ -158,9 +150,21 @@ export default function ValidationReport() {
   const [allExpanded, setAllExpanded] = useState(false);
   const [expandedWarning, setExpandedWarning] = useState<number | null>(null);
 
-  const errors = mockValidationIssues.filter((i) => i.severity === "error");
-  const warnings = mockValidationIssues.filter((i) => i.severity === "warning");
-  const infos = mockValidationIssues.filter((i) => i.severity === "info");
+  const storeState = useSyncExternalStore(subscribe, getStore);
+  const extracted = storeState.extractedData;
+
+  const {
+    resourceTree,
+    validationIssues,
+    complianceItems,
+    resourceBreakdown,
+    totalResources,
+    healthScore
+  } = useMemo(() => buildFhirValidationData(extracted), [extracted]);
+
+  const errors = validationIssues.filter((i) => i.severity === "error");
+  const warnings = validationIssues.filter((i) => i.severity === "warning");
+  const infos = validationIssues.filter((i) => i.severity === "info");
 
   const handleRevalidate = () => {
     setRevalidating(true);
@@ -178,17 +182,6 @@ export default function ValidationReport() {
     item: { initial: { opacity: 0, x: -10 }, animate: { opacity: 1, x: 0 } },
   };
 
-  const resourceBreakdown = [
-    { type: "Patient", count: 1 },
-    { type: "Encounter", count: 1 },
-    { type: "Condition", count: 4 },
-    { type: "Procedure", count: 4 },
-    { type: "MedicationRequest", count: 6 },
-    { type: "Observation", count: 12 },
-    { type: "Practitioner", count: 2 },
-    { type: "Organization", count: 1 },
-  ];
-
   return (
     <div className="space-y-6">
       {/* Stats row */}
@@ -198,7 +191,7 @@ export default function ValidationReport() {
           animate={{ opacity: 1, y: 0 }}
           className="flex items-center justify-center p-6 rounded-lg bg-[#0F1629] card-shadow"
         >
-          <HealthGauge score={96} />
+          <HealthGauge score={healthScore} />
         </motion.div>
 
         <motion.div
@@ -208,7 +201,7 @@ export default function ValidationReport() {
           className="flex flex-col items-center justify-center p-6 rounded-lg bg-[#0F1629] card-shadow"
         >
           <Layers className="w-8 h-8 text-[#4F46E5] mb-2" />
-          <div className="text-4xl text-[#F1F5F9] font-bold">31</div>
+          <div className="text-4xl text-[#F1F5F9] font-bold">{totalResources}</div>
           <div className="text-xs text-[#94A3B8] mb-3">FHIR Resources Generated</div>
           <div className="flex flex-wrap gap-1.5 justify-center">
             {resourceBreakdown.map((r) => (
@@ -230,7 +223,7 @@ export default function ValidationReport() {
             <span className="px-3 py-1 rounded-full bg-[#F59E0B]/20 text-[#F59E0B] text-sm font-semibold">7/8 Passed</span>
           </div>
           <div className="text-xs text-[#94A3B8] mt-2">NHCX Profile Status</div>
-          <div className="text-xs text-[#94A3B8] mt-1">0 Errors · 2 Warnings · 0 Info</div>
+          <div className="text-xs text-[#94A3B8] mt-1">{errors.length} Errors · {warnings.length} Warnings · {infos.length} Info</div>
           <div className="text-[10px] text-[#94A3B8]/60 mt-1">NRCeS NHCX R4 Profile v2.1</div>
         </motion.div>
       </div>
@@ -247,7 +240,7 @@ export default function ValidationReport() {
               animate="animate"
               className="space-y-1"
             >
-              {mockComplianceItems.map((item, i) => (
+              {complianceItems.map((item, i) => (
                 <motion.div
                   key={i}
                   variants={stagger.item}
@@ -277,7 +270,7 @@ export default function ValidationReport() {
             </motion.div>
 
             {/* Expandable warning detail */}
-            {expandedWarning !== null && mockComplianceItems[expandedWarning]?.status === "warning" && (
+            {expandedWarning !== null && complianceItems[expandedWarning]?.status === "warning" && (
               <motion.div
                 initial={{ opacity: 0, height: 0 }}
                 animate={{ opacity: 1, height: "auto" }}
@@ -350,7 +343,7 @@ export default function ValidationReport() {
             </div>
           </div>
           <div className="space-y-0.5">
-            {mockResourceTree.map((node, i) => (
+            {resourceTree.map((node, i) => (
               <ResourceTreeNode key={i} node={node} />
             ))}
           </div>
@@ -393,15 +386,6 @@ export default function ValidationReport() {
 }
 
 /* ── Issue Row subcomponent ── */
-
-interface ValidationIssue {
-  severity: "error" | "warning" | "info";
-  path: string;
-  fhirPath: string;
-  message: string;
-  fixField: string;
-  fullMessage: string;
-}
 
 function IssueRow({ issue, IconComp, iconColor }: {
   issue: ValidationIssue;

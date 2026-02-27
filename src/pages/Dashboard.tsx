@@ -7,6 +7,9 @@ import {
 } from "lucide-react";
 import { mockRecentJobs, downloadMockFHIRBundle } from "@/data/mockData";
 import { useToast } from "@/hooks/use-toast";
+import { extractPDFWithFallback, combinePagesForLLM } from '@/lib/pdfExtractor';
+import { extractWithOllama, extractWithSections, getAvailableOllamaModels, extractDiagnosticReport } from '@/lib/ollamaExtractor';
+import { setUploadedFile, setExtracting, setExtractionProgress, setExtractedData, setError, setModel } from '@/store/extractionStore';
 
 const stagger = { hidden: {}, show: { transition: { staggerChildren: 0.05 } } };
 const fadeUp = { hidden: { opacity: 0, y: 16 }, show: { opacity: 1, y: 0, transition: { duration: 0.3 } } };
@@ -30,21 +33,39 @@ function StatChip({ icon: Icon, label, value, delay }: { icon: any; label: strin
   );
 }
 
-function UploadCard({ title, description, onUpload }: { title: string; description: string; onUpload: () => void }) {
+function UploadCard({ title, description, onUpload }: { title: string; description: string; onUpload: (file?: File) => void }) {
   const [isDragging, setIsDragging] = useState(false);
   const [uploaded, setUploaded] = useState(false);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+  const [fileName, setFileName] = useState('');
+  const [fileSize, setFileSize] = useState('');
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
-    setUploaded(true);
-    setTimeout(onUpload, 500);
+    const file = e.dataTransfer.files[0];
+    if (file) {
+      setUploaded(true);
+      setFileName(file.name);
+      setFileSize((file.size / (1024 * 1024)).toFixed(1) + ' MB');
+      setTimeout(() => onUpload(file), 300);
+    }
   }, [onUpload]);
 
   const handleClick = () => {
-    setUploaded(true);
-    setTimeout(onUpload, 500);
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.pdf';
+    input.onchange = (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      if (file) {
+        setUploaded(true);
+        setFileName(file.name);
+        setFileSize((file.size / (1024 * 1024)).toFixed(1) + ' MB');
+        setTimeout(() => onUpload(file), 300);
+      }
+    };
+    input.click();
   };
 
   return (
@@ -78,8 +99,8 @@ function UploadCard({ title, description, onUpload }: { title: string; descripti
             <div className="w-12 h-12 rounded-full bg-success/20 flex items-center justify-center">
               <Check className="w-6 h-6 text-success" />
             </div>
-            <span className="text-body text-foreground font-medium">DS_RahulSharma_Feb2026.pdf</span>
-            <span className="text-caption text-muted-foreground">2.4 MB</span>
+            <span className="text-body text-foreground font-medium">{fileName || 'DS_RahulSharma_Feb2026.pdf'}</span>
+            <span className="text-caption text-muted-foreground">{fileSize || '2.4 MB'}</span>
           </motion.div>
         ) : (
           <>
@@ -159,19 +180,141 @@ export default function Dashboard() {
   const [uploaded, setUploaded] = useState(false);
   const [pipelineStage, setPipelineStage] = useState(-1);
 
-  const handleUpload = () => {
+  const handleUpload = async (file?: File, docType: 'discharge' | 'diagnostic' = 'discharge') => {
     setUploaded(true);
     setPipelineStage(0);
-    let stage = 0;
-    const interval = setInterval(() => {
-      stage++;
-      if (stage >= 5) {
-        clearInterval(interval);
-        setTimeout(() => navigate("/review"), 600);
-      } else {
-        setPipelineStage(stage);
+
+    // If no real file provided, use demo mode
+    if (!file) {
+      let stage = 0;
+      const interval = setInterval(() => {
+        stage++;
+        if (stage >= 5) { clearInterval(interval); setTimeout(() => navigate('/review'), 600); }
+        else setPipelineStage(stage);
+      }, 800);
+      return;
+    }
+
+    // Real file: store it and begin extraction
+    setUploadedFile(file);
+    setExtracting(true);
+
+    try {
+      setPipelineStage(0); // Classifying
+
+      // ── PDF Extraction with OCR fallback ──
+      const extraction = await extractPDFWithFallback(file, (message) => {
+        setExtractionProgress(message);
+      }, docType);
+
+      if (extraction.mode === 'failed' || extraction.charCount < 50) {
+        const reason = 'Could not extract readable text from this PDF even with OCR. The file may be corrupted or use an unsupported format.';
+        setError(reason);
+        toast({ title: 'Extraction failed', description: reason, variant: 'destructive' });
+        setPipelineStage(-1);
+        setUploaded(false);
+        setExtracting(false);
+        return;
       }
-    }, 800);
+
+      const modeLabel = extraction.mode === 'ocr' ? 'OCR' : 'text layer';
+      toast({
+        title: `Text extracted via ${modeLabel}`,
+        description: `${extraction.charCount} chars from ${extraction.pageCount} page(s). Running AI extraction...`,
+      });
+
+      setPipelineStage(1); // Parsing
+
+      // ── Model selection ──
+      const models = await getAvailableOllamaModels();
+      console.log('Available Ollama models:', models);
+      const preferredModels = ['llama3.1:8b', 'llama3.2:3b', 'llama3:8b', 'llama3', 'mistral', 'phi3', 'gemma'];
+      const chosenModel =
+        models.find(m => preferredModels.some(p => m.toLowerCase().includes(p)))
+        ?? models[0]
+        ?? 'llama3.2:3b';
+      setModel(chosenModel);
+
+      setPipelineStage(2); // Extracting
+
+      // Multi-pass extraction using detected sections
+      const sections = extraction.sections;
+      const hasSections = sections.medications.length > 50 || sections.diagnosis.length > 10;
+
+      if (docType === 'diagnostic') {
+        const fullText = combinePagesForLLM(extraction.pages, 6000);
+        await extractDiagnosticReport(
+          fullText, chosenModel,
+          (msg) => setExtractionProgress(`[${modeLabel.toUpperCase()}] ${msg}`),
+          (result) => {
+            setPipelineStage(4);
+            setExtractedData(result);
+            toast({
+              title: `✓ Diagnostic extraction complete`,
+              description: `${result.labValues.length} lab values, ${result.diagnoses.length} diagnoses`,
+            });
+            setTimeout(() => navigate('/review'), 1200);
+          },
+          (err) => {
+            setError(err);
+            toast({ title: 'AI extraction failed', description: err, variant: 'destructive' });
+            setPipelineStage(-1);
+            setUploaded(false);
+            setExtracting(false);
+          }
+        );
+      } else if (hasSections) {
+        // Use professional multi-pass approach
+        await extractWithSections(
+          sections,
+          chosenModel,
+          (msg) => {
+            setExtractionProgress(`[${modeLabel.toUpperCase()}] ${msg}`);
+            if (msg.includes('Pass 2')) setPipelineStage(3);
+            if (msg.includes('Assembling')) setPipelineStage(4);
+          },
+          (result) => {
+            setPipelineStage(4);
+            setExtractedData(result);
+            toast({
+              title: `✓ Multi-pass extraction complete`,
+              description: `${result.diagnoses.length} diagnoses, ${result.medications.length} medications, ${result.vitals.length} vitals`,
+            });
+            setTimeout(() => navigate('/review'), 1200);
+          },
+          (err) => {
+            setError(err);
+            toast({ title: 'AI extraction failed', description: err, variant: 'destructive' });
+            setPipelineStage(-1);
+            setUploaded(false);
+            setExtracting(false);
+          }
+        );
+      } else {
+        // Fallback: single-pass with full raw text
+        const fullText = combinePagesForLLM(extraction.pages, 6000);
+        await extractWithOllama(
+          fullText, chosenModel,
+          (partial) => setExtractionProgress(`[${modeLabel.toUpperCase()}] ${partial.substring(0, 200)}`),
+          (result) => {
+            setPipelineStage(4);
+            setExtractedData(result);
+            toast({ title: '✓ Extraction complete', description: `${result.medications.length} medications extracted` });
+            setTimeout(() => navigate('/review'), 1200);
+          },
+          (err) => {
+            setError(err);
+            toast({ title: 'AI extraction failed', description: err, variant: 'destructive' });
+            setPipelineStage(-1); setUploaded(false); setExtracting(false);
+          }
+        );
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      setError(msg);
+      setExtracting(false);
+      toast({ title: 'Processing failed', description: msg, variant: 'destructive' });
+    }
   };
 
   return (
@@ -206,12 +349,12 @@ export default function Dashboard() {
           <UploadCard
             title="Discharge Summary"
             description="Hospital discharge summary PDF"
-            onUpload={handleUpload}
+            onUpload={(file) => handleUpload(file, 'discharge')}
           />
           <UploadCard
             title="Diagnostic Report"
             description="Lab / imaging diagnostic report PDF"
-            onUpload={handleUpload}
+            onUpload={(file) => handleUpload(file, 'diagnostic')}
           />
         </div>
         <div className="flex items-center gap-3 mt-4">
