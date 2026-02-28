@@ -267,7 +267,7 @@ npm run build
 npm run preview
 ```
 
-The `dist/` folder can be deployed to any static hosting provider (Vercel, Netlify, Cloudflare Pages, etc.).
+
 
 
 </div>
