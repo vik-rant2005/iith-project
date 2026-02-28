@@ -269,18 +269,5 @@ npm run preview
 
 The `dist/` folder can be deployed to any static hosting provider (Vercel, Netlify, Cloudflare Pages, etc.).
 
----
-
-## 📄 License
-
-Distributed under the MIT License. See [`LICENSE`](LICENSE) for more information.
-
----
-
-<div align="center">
-
-Made with ❤️ for India's Digital Health Mission
-
-**[⬆ Back to Top](#-cliniq--clinical-fhir-converter)**
 
 </div>
